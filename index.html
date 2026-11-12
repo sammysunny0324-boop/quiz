@@ -6,6 +6,9 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" type="image/png" href="favicon-64.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="แดนความรู้">
@@ -262,6 +265,12 @@ label.btn{cursor:pointer}
 .dangerbtn{background:var(--no-soft);border-color:var(--no);color:var(--no);box-shadow:0 3px 0 color-mix(in srgb,var(--no) 45%,transparent)}
 .pdel{background:var(--no-soft);border:2px solid var(--no);border-radius:18px;padding:12px 14px;display:grid;gap:10px}
 .sndbtn{gap:10px}.sndbtn.on{border-color:var(--ok);background:var(--ok-soft)}.sndbtn span{font-family:var(--f-body);font-weight:600}
+.cloudbar{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:center}.cloudbar.on{border-color:var(--ok)}.cicon{font-size:28px}
+.gbtn{gap:12px;background:#fff;color:#1f1f1f;border-color:#dadce0}
+.orline{display:flex;align-items:center;gap:10px;color:var(--muted);font-size:14px}.orline::before,.orline::after{content:"";flex:1;height:2px;background:var(--line)}
+.tin{width:100%;min-height:48px;border:2px solid var(--line);border-radius:12px;padding:8px 12px;font:inherit;background:var(--card);color:var(--ink)}
+.consent{display:flex;gap:10px;align-items:flex-start;font-size:15px;background:var(--gold-soft);border-radius:14px;padding:10px 12px}.consent input{width:22px;height:22px;flex:none;margin-top:2px}.consent a{color:var(--accent);font-weight:700}
+.privacy h3{margin:14px 0 4px;font-size:17px}.privacy h3:first-child{margin-top:0}.privacy p{margin:4px 0;line-height:1.6}
 </style>
 
 <div class="wrap"><main id="app"></main></div>
@@ -2001,6 +2010,295 @@ const JP_GROUPS=[
 ];
 const JP_TP2G={};JP_GROUPS.forEach(G=>G.tps.forEach(t=>JP_TP2G[t]=G.id));
 if(typeof module!=='undefined')module.exports={JP_GROUPS,JP_TP2G};
+
+// ค่าตั้งค่า Firebase ของเว็บ (ไม่ใช่รหัสลับ: ความปลอดภัยของข้อมูลมาจาก Firestore Security Rules)
+const FIREBASE_CONFIG = {
+  apiKey: 'AIzaSyCNIvpknZycIF0DncwBaQhmZwKGGHIJukY',
+  authDomain: 'daenkwamru.firebaseapp.com',
+  projectId: 'daenkwamru',
+  storageBucket: 'daenkwamru.firebasestorage.app',
+  messagingSenderId: '115812385903',
+  appId: '1:115812385903:web:6c8dc8224f0cdb82fc799a',
+};
+if (typeof module !== 'undefined') module.exports = FIREBASE_CONFIG;
+
+// ---------- บัญชีผู้ปกครอง + ซิงก์คลาวด์ (Firebase) + หน้าผู้ปกครอง + นโยบายความเป็นส่วนตัว ----------
+// ทำงานเฉพาะบนเว็บของเราเอง (โหลด Firebase SDK ได้ และไม่ได้อยู่ใน iframe) ถ้าไม่มีก็เล่นแบบเก็บในเครื่องเหมือนเดิม
+// ข้อมูลทั้งครอบครัวเก็บเป็นเอกสารเดียว families/{uid} = { db: JSON ของ DB, kids: สรุปสั้น ๆ, t, updatedAt }
+const CLOUD = (() => { try { return typeof firebase !== 'undefined' && typeof FIREBASE_CONFIG !== 'undefined' && window.top === window; } catch (e) { return false; } })();
+let FB = null, USER = null, VIEW = '', PENDING = null;
+const SYNC = { busy: false, timer: null, retry: null, last: 0, err: '', dirty: false, ready: false };
+
+// ---------- รวมข้อมูลสองชุด (เครื่องนี้ + คลาวด์) โดยไม่ให้ความคืบหน้าหาย ----------
+const dnum = s => { const p = String(s || '').split('-').map(Number); return p.length === 3 ? p[0] * 1e4 + p[1] * 100 + p[2] : 0; };
+const answeredOf = k => { let n = 0; Object.values((k || {}).c || {}).forEach(x => n += Object.keys(x.p || {}).length); return n; };
+function mergeKid(a, b) {
+  if (!a && !b) return {};
+  if (!a) return JSON.parse(JSON.stringify(b));
+  if (!b) return a;
+  const m = JSON.parse(JSON.stringify(a)); m.c = m.c || {};
+  for (const [k, v] of Object.entries(b.c || {})) m.c[k] = { ...(m.c[k] || {}), p: { ...(v.p || {}), ...((m.c[k] || {}).p || {}) } };
+  m.xp = Math.max(a.xp || 0, b.xp || 0); m.best = Math.max(a.best || 0, b.best || 0);
+  m.bad = { ...(b.bad || {}), ...(a.bad || {}) };
+  const later = (x, y) => !x ? y : !y ? x : (dnum(y.d) > dnum(x.d) || (y.d === x.d && y.n > x.n)) ? y : x;
+  m.day = later(a.day, b.day); m.streak = later(a.streak, b.streak);
+  if (a.jp || b.jp) {
+    const A = a.jp || {}, B = b.jp || {}, best = { ...(B.best || {}) };
+    Object.entries(A.best || {}).forEach(([k, v]) => { if (!best[k] || v.total >= best[k].total) best[k] = v; });
+    m.jp = { best, ans: { ...(B.ans || {}), ...(A.ans || {}) }, cur: A.cur || B.cur || null };
+  }
+  return m;
+}
+function mergeDB(a, b) {
+  a = a || {}; b = b || {};
+  const del = [...new Set([...(a.deleted || []), ...(b.deleted || [])])], ps = new Map();
+  [...(b.profiles || []), ...(a.profiles || [])].forEach(p => { if (!del.includes(p.id)) ps.set(p.id, { ...(ps.get(p.id) || {}), ...p }); });
+  const data = {};
+  for (const id of ps.keys()) data[id] = mergeKid((a.data || {})[id], (b.data || {})[id]);
+  return { ...b, ...a, profiles: [...ps.values()], data, deleted: del, cur: ps.has(a.cur) ? a.cur : (ps.has(b.cur) ? b.cur : null) };
+}
+const kidSummary = () => (DB.profiles || []).map(p => { const k = (DB.data || {})[p.id] || {}; return { id: p.id, name: p.name, answered: answeredOf(k), xp: k.xp || 0, last: (k.day || {}).d || '', badges: Object.keys(k.bad || {}).length }; });
+
+// ---------- ส่ง / ดึงข้อมูล ----------
+function cloudQueue() { if (!USER || !SYNC.ready) return; SYNC.dirty = true; clearTimeout(SYNC.timer); SYNC.timer = setTimeout(cloudPush, 4000); paintSync(); }
+async function cloudPush() {
+  if (!USER || !SYNC.ready) return;
+  if (SYNC.busy) { cloudQueue(); return; }
+  SYNC.busy = true; clearTimeout(SYNC.timer); paintSync();
+  try {
+    DB.uid = USER.uid; DB.t = DB.t || Date.now();
+    const s = JSON.stringify(DB);
+    await FB.db.collection('families').doc(USER.uid).set({ v: 1, db: s, t: DB.t, kids: kidSummary(), updatedAt: firebase.firestore.FieldValue.serverTimestamp() });
+    try { localStorage.setItem(KEY, s); } catch (e) {}
+    SYNC.last = Date.now(); SYNC.err = ''; SYNC.dirty = false; clearTimeout(SYNC.retry);
+  } catch (e) {
+    SYNC.err = (e && (e.code || e.message)) || 'error';
+    clearTimeout(SYNC.retry); SYNC.retry = setTimeout(cloudPush, 30000);
+  }
+  SYNC.busy = false; paintSync();
+}
+async function cloudFetch() { const snap = await FB.db.collection('families').doc(USER.uid).get(); if (!snap.exists) return null; try { return JSON.parse(snap.data().db || '{}'); } catch (e) { return null; } }
+// หลังล็อกอิน: 'ok' = รวมแล้ว, 'ask' = เครื่องนี้มีผู้เล่นที่ยังไม่ผูกบัญชี และบัญชีก็มีผู้เล่นอยู่แล้ว ต้องถามก่อน
+async function cloudPull() {
+  const cloud = await cloudFetch();
+  const localKids = (DB.profiles || []).length, linked = DB.uid === USER.uid;
+  if (!cloud || !(cloud.profiles || []).length) { DB = mergeDB(DB, cloud || {}); SYNC.ready = true; saveLocal(); await cloudPush(); return 'ok'; }
+  if (linked || !localKids) { DB = mergeDB(linked ? DB : { cur: DB.cur }, cloud); SYNC.ready = true; saveLocal(); await cloudPush(); return 'ok'; }
+  PENDING = cloud; return 'ask';
+}
+async function cloudSyncNow() {
+  if (!USER || !SYNC.ready || SYNC.busy) return;
+  try { const cloud = await cloudFetch(); if (cloud) { DB = mergeDB(DB, cloud); saveLocal(); } await cloudPush(); }
+  catch (e) { SYNC.err = (e && (e.code || e.message)) || 'error'; paintSync(); }
+}
+function saveLocal() { DB.profiles = DB.profiles || []; DB.data = DB.data || {}; try { localStorage.setItem(KEY, JSON.stringify(DB)); } catch (e) {} }
+function paintSync() {
+  const el = document.getElementById('syncst'); if (!el) return;
+  el.textContent = !navigator.onLine ? 'ออฟไลน์อยู่ จะซิงก์เองเมื่อมีเน็ต' : SYNC.busy ? 'กำลังซิงก์…' : SYNC.err ? 'ซิงก์ไม่สำเร็จ จะลองใหม่อัตโนมัติ' : SYNC.dirty ? 'รอซิงก์…' : SYNC.last ? 'ซิงก์แล้ว ' + new Date(SYNC.last).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' }) + ' น.' : 'เชื่อมต่อแล้ว';
+  el.className = 'small ' + (SYNC.err ? 'lowtxt' : 'muted');
+}
+function cloudInit() {
+  if (!CLOUD) return;
+  try {
+    firebase.initializeApp(FIREBASE_CONFIG);
+    FB = { auth: firebase.auth(), db: firebase.firestore() };
+    FB.auth.languageCode = 'th';
+    FB.auth.getRedirectResult().catch(e => { SYNC.err = e.code || ''; });
+    FB.auth.onAuthStateChanged(async u => {
+      USER = u; SYNC.ready = false;
+      if (u) {
+        try { if (await cloudPull() === 'ask') { mergeAskView(); return; } }
+        catch (e) { SYNC.err = (e && (e.code || e.message)) || 'error'; SYNC.ready = true; }
+      }
+      paintSync();
+      if (!RUN && !EX && (VIEW === 'profiles' || VIEW === 'login' || VIEW === 'account')) { profiles(); toTop(); }
+    });
+    addEventListener('online', () => { if (SYNC.dirty) cloudPush(); paintSync(); });
+    addEventListener('offline', paintSync);
+    document.addEventListener('visibilitychange', () => { if (!USER || !SYNC.ready) return; if (document.visibilityState === 'hidden') { if (SYNC.dirty) cloudPush(); } else cloudSyncNow(); });
+  } catch (e) { console.warn('cloud init', e); }
+}
+
+// ---------- แถบบัญชีในหน้าเลือกผู้เล่น ----------
+function cloudBar() {
+  if (!CLOUD) return '';
+  if (!USER) return `<div class="panel cloudbar"><span class="cicon">☁️</span><span><b>เก็บความคืบหน้าไว้บนคลาวด์</b><br><span class="small muted">เปลี่ยนมือถือหรือใช้หลายเครื่องก็ไม่หาย ผู้ปกครองดูพัฒนาการของลูกได้</span></span><button class="btn sm primary" id="clogin">เข้าสู่ระบบ</button></div>`;
+  return `<div class="panel cloudbar on"><span class="cicon">☁️</span><span><b>บัญชีผู้ปกครอง</b><br><span class="small muted">${esc(USER.email || 'บัญชี Google')}</span><br><span id="syncst" class="small muted"></span></span><button class="btn sm" id="cacc">บัญชี</button></div>`;
+}
+function bindCloudBar() {
+  const a = document.getElementById('clogin'); if (a) a.onclick = () => { sound('tap'); loginView(); toTop(); };
+  const b = document.getElementById('cacc'); if (b) b.onclick = () => { sound('tap'); accountView(); toTop(); };
+  paintSync();
+}
+
+// ---------- หน้าเข้าสู่ระบบ ----------
+const AUTH_ERR = {
+  'auth/invalid-email': 'รูปแบบอีเมลไม่ถูกต้อง', 'auth/missing-password': 'กรุณาใส่รหัสผ่าน',
+  'auth/invalid-credential': 'อีเมลหรือรหัสผ่านไม่ถูกต้อง', 'auth/wrong-password': 'อีเมลหรือรหัสผ่านไม่ถูกต้อง', 'auth/user-not-found': 'ยังไม่มีบัญชีนี้ กด "สมัครบัญชีใหม่" ได้เลย',
+  'auth/email-already-in-use': 'อีเมลนี้สมัครไว้แล้ว ให้กด "เข้าสู่ระบบ" แทน', 'auth/weak-password': 'รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร',
+  'auth/popup-closed-by-user': 'ปิดหน้าต่างล็อกอินก่อนเสร็จ ลองใหม่อีกครั้ง', 'auth/cancelled-popup-request': 'ลองกดใหม่อีกครั้ง',
+  'auth/network-request-failed': 'ไม่มีอินเทอร์เน็ต ลองใหม่เมื่อเชื่อมต่อแล้ว', 'auth/too-many-requests': 'ลองหลายครั้งเกินไป รอสักครู่แล้วลองใหม่',
+  'auth/unauthorized-domain': 'เว็บนี้ยังไม่ได้รับอนุญาตให้ล็อกอิน', 'auth/requires-recent-login': 'เพื่อความปลอดภัย กรุณาออกจากระบบแล้วเข้าสู่ระบบใหม่ก่อน',
+};
+const authMsg = e => AUTH_ERR[e && e.code] || ('เกิดข้อผิดพลาด ' + ((e && e.code) || ''));
+function loginView() {
+  VIEW = 'login'; document.body.dataset.sub = 'm';
+  if (!CLOUD || !FB) { profiles(); return; }
+  app.innerHTML = `<div class="stack">
+    <div class="top"><button class="btn ghost" id="back">← กลับ</button></div>
+    <div class="hero">${OWL('hi')}<div class="bubble"><b>บัญชีผู้ปกครอง</b><br><span class="small">ผู้ปกครองเป็นคนสมัครครั้งเดียว แล้วเพิ่มชื่อลูกได้หลายคน ความคืบหน้าจะเก็บบนคลาวด์ ใช้ได้ทุกเครื่อง</span></div></div>
+    <label class="consent"><input type="checkbox" id="agree"> <span>ฉันเป็น<b>ผู้ปกครอง</b> และยอมรับ<a href="#" id="pp">นโยบายความเป็นส่วนตัว</a></span></label>
+    <button class="btn block gbtn" id="google"><svg viewBox="0 0 48 48" width="22" height="22" aria-hidden="true"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.6 5.4 2.7 13.3l7.9 6.1C12.5 13.6 17.8 9.5 24 9.5z"/><path fill="#4285F4" d="M46.1 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.4c-.5 2.9-2.2 5.3-4.6 6.9l7.4 5.8c4.3-4 6.9-9.9 6.9-17.2z"/><path fill="#FBBC05" d="M10.6 28.6c-.5-1.4-.8-3-.8-4.6s.3-3.2.8-4.6l-7.9-6.1C1 16.6 0 20.2 0 24s1 7.4 2.7 10.7l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.4-5.8c-2.1 1.4-4.8 2.3-8.5 2.3-6.2 0-11.5-4.1-13.4-9.9l-7.9 6.1C6.6 42.6 14.6 48 24 48z"/></svg>เข้าสู่ระบบด้วย Google</button>
+    <div class="orline"><span>หรือใช้อีเมล</span></div>
+    <form id="ef" class="panel stack" style="gap:10px">
+      <label class="small" for="em">อีเมล</label><input id="em" type="email" autocomplete="email" class="tin" placeholder="name@example.com">
+      <label class="small" for="pw">รหัสผ่าน (อย่างน้อย 6 ตัว)</label><input id="pw" type="password" autocomplete="current-password" class="tin">
+      <div class="row" style="gap:8px"><button class="btn primary" type="submit" style="flex:1">เข้าสู่ระบบ</button><button class="btn" type="button" id="signup" style="flex:1">สมัครใหม่</button></div>
+      <button class="btn ghost small" type="button" id="forgot">ลืมรหัสผ่าน</button>
+    </form>
+    <p class="err" id="lerr" role="alert"></p>
+    <p class="muted small" style="text-align:center">ไม่อยากสมัครก็เล่นต่อได้ตามปกติ ข้อมูลจะเก็บไว้ในเครื่องนี้เท่านั้น</p>
+  </div>`;
+  const er = t => { document.getElementById('lerr').textContent = t; }, agreed = () => { if (document.getElementById('agree').checked) return true; er('กรุณาติ๊กยืนยันว่าเป็นผู้ปกครองและยอมรับนโยบายก่อน'); return false; };
+  const busy = on => app.querySelectorAll('button').forEach(b => b.disabled = on);
+  document.getElementById('back').onclick = () => { profiles(); toTop(); };
+  document.getElementById('pp').onclick = e => { e.preventDefault(); privacyView(() => loginView()); };
+  document.getElementById('google').onclick = async () => {
+    if (!agreed()) return; er(''); busy(true);
+    const p = new firebase.auth.GoogleAuthProvider(); p.setCustomParameters({ prompt: 'select_account' });
+    try { await FB.auth.signInWithPopup(p); }
+    catch (e) { if (e.code === 'auth/popup-blocked' || e.code === 'auth/operation-not-supported-in-this-environment') { try { await FB.auth.signInWithRedirect(p); return; } catch (e2) { er(authMsg(e2)); } } else er(authMsg(e)); }
+    busy(false);
+  };
+  const em = () => document.getElementById('em').value.trim(), pw = () => document.getElementById('pw').value;
+  document.getElementById('ef').onsubmit = async e => { e.preventDefault(); er(''); busy(true); try { await FB.auth.signInWithEmailAndPassword(em(), pw()); } catch (x) { er(authMsg(x)); } busy(false); };
+  document.getElementById('signup').onclick = async () => { if (!agreed()) return; er(''); busy(true); try { await FB.auth.createUserWithEmailAndPassword(em(), pw()); } catch (x) { er(authMsg(x)); } busy(false); };
+  document.getElementById('forgot').onclick = async () => { if (!em()) { er('พิมพ์อีเมลก่อน แล้วกด "ลืมรหัสผ่าน" อีกครั้ง'); return; } try { await FB.auth.sendPasswordResetEmail(em()); toast('ส่งลิงก์ตั้งรหัสผ่านใหม่ไปที่อีเมลแล้ว'); } catch (x) { er(authMsg(x)); } };
+}
+
+// ---------- เครื่องนี้มีผู้เล่นอยู่แล้ว และบัญชีก็มีผู้เล่น: ถามก่อนรวม ----------
+function mergeAskView() {
+  VIEW = 'merge'; const cloud = PENDING || {}; const here = DB.profiles.map(p => p.name), there = (cloud.profiles || []).map(p => p.name);
+  app.innerHTML = `<div class="stack">
+    <div class="hero">${OWL('hmm')}<div class="bubble"><b>พบข้อมูลสองที่</b><br><span class="small">เครื่องนี้มีผู้เล่นที่ยังไม่ได้อยู่ในบัญชี จะทำอย่างไรดี</span></div></div>
+    <div class="panel small"><p><b>ในเครื่องนี้:</b> ${here.map(esc).join(', ')}</p><p style="margin-top:6px"><b>ในบัญชี:</b> ${there.map(esc).join(', ')}</p></div>
+    <button class="btn primary block" id="mg">รวมทั้งหมดไว้ในบัญชี (แนะนำ)</button>
+    <button class="btn block" id="cl">ใช้เฉพาะข้อมูลในบัญชี (ลบของเครื่องนี้)</button>
+    <p class="muted small">ถ้าเป็นเด็กคนเดียวกันแต่สร้างชื่อไว้สองที่ จะเห็นเป็นสองชื่อ ลบชื่อที่ไม่ใช้ได้ภายหลัง</p>
+  </div>`;
+  const done = async d => { DB = d; PENDING = null; SYNC.ready = true; saveLocal(); await cloudPush(); toast('ซิงก์ข้อมูลเรียบร้อย'); profiles(); toTop(); };
+  document.getElementById('mg').onclick = () => done(mergeDB(DB, cloud));
+  document.getElementById('cl').onclick = () => done(mergeDB({ cur: null }, cloud));
+}
+
+// ---------- หน้าบัญชี ----------
+let accConfirm = '';
+function accountView() {
+  VIEW = 'account'; document.body.dataset.sub = 'm';
+  if (!USER) { loginView(); return; }
+  app.innerHTML = `<div class="stack">
+    <div class="top"><button class="btn ghost" id="back">← กลับ</button></div>
+    <header><p class="label">บัญชีผู้ปกครอง</p><h1 style="font-size:24px;overflow-wrap:anywhere">${esc(USER.email || 'บัญชี Google')}</h1><p id="syncst" class="small muted"></p></header>
+    <button class="btn primary block" id="pv">หน้าผู้ปกครอง: ดูพัฒนาการของลูก</button>
+    <button class="btn block" id="sy">ซิงก์ตอนนี้</button>
+    <section class="panel stack" style="gap:8px">
+      ${accConfirm === 'out' ? `<p><b>ออกจากระบบ?</b><br><span class="small">ข้อมูลยังอยู่ในบัญชี เข้าสู่ระบบใหม่เมื่อไรก็กลับมาครบ</span></p>
+        <button class="btn block" id="out1">ออกจากระบบ แต่เก็บข้อมูลไว้ในเครื่องนี้</button><button class="btn block" id="out2">ออกจากระบบ และล้างข้อมูลในเครื่องนี้ (เครื่องที่ใช้ร่วมกัน)</button><button class="btn ghost small" id="cx">ยกเลิก</button>`
+      : `<button class="btn block" id="out">ออกจากระบบ</button>`}
+    </section>
+    <section class="panel stack" style="gap:8px">
+      <p class="label" style="margin:0">ความเป็นส่วนตัว</p>
+      <button class="btn ghost small" id="pp" style="align-self:flex-start">อ่านนโยบายความเป็นส่วนตัว</button>
+      ${accConfirm === 'del' ? `<div class="pdel"><p><b>ลบบัญชีและข้อมูลทั้งหมดถาวร?</b><br><span class="small">ข้อมูลของลูกทุกคนบนคลาวด์และในเครื่องนี้จะถูกลบ กู้คืนไม่ได้ (ถ้าต้องการเก็บไว้ ให้สำรองข้อมูลก่อน)</span></p><div class="row" style="gap:8px"><button class="btn sm dangerbtn" id="delok">ลบถาวร</button><button class="btn sm" id="cx">ยกเลิก</button></div></div>`
+      : `<button class="btn sm dangerbtn" id="del" style="align-self:flex-start">ลบบัญชีและข้อมูลทั้งหมด</button>`}
+    </section>
+    <p class="err" id="aerr" role="alert"></p>
+  </div>`;
+  paintSync();
+  const er = t => { document.getElementById('aerr').textContent = t; }, $ = id => document.getElementById(id);
+  $('back').onclick = () => { accConfirm = ''; profiles(); toTop(); };
+  $('pv').onclick = () => { parentView(() => accountView()); toTop(); };
+  $('sy').onclick = async () => { await cloudSyncNow(); toast(SYNC.err ? 'ซิงก์ไม่สำเร็จ' : 'ซิงก์แล้ว'); };
+  $('pp').onclick = () => privacyView(() => accountView());
+  if ($('out')) $('out').onclick = () => { accConfirm = 'out'; accountView(); };
+  if ($('del')) $('del').onclick = () => { accConfirm = 'del'; accountView(); };
+  if ($('cx')) $('cx').onclick = () => { accConfirm = ''; accountView(); };
+  const signOut = async wipe => { try { if (SYNC.dirty) await cloudPush(); } catch (e) {} SYNC.ready = false; await FB.auth.signOut(); if (wipe) { DB = { profiles: [], data: {} }; saveLocal(); } accConfirm = ''; toast('ออกจากระบบแล้ว'); profiles(); toTop(); };
+  if ($('out1')) $('out1').onclick = () => signOut(false);
+  if ($('out2')) $('out2').onclick = () => signOut(true);
+  if ($('delok')) $('delok').onclick = async () => {
+    try { SYNC.ready = false; await FB.db.collection('families').doc(USER.uid).delete(); await USER.delete(); DB = { profiles: [], data: {} }; saveLocal(); accConfirm = ''; toast('ลบบัญชีและข้อมูลเรียบร้อย'); profiles(); toTop(); }
+    catch (e) { SYNC.ready = true; er(authMsg(e)); if (e.code === 'auth/requires-recent-login') { await cloudPush(); } }
+  };
+}
+
+// ---------- หน้าผู้ปกครอง ----------
+function kidReport(pid) {
+  const d = (DB.data || {})[pid] || {}, rows = [], tp = new Map(); let n = 0, ok = 0;
+  for (const key of Object.keys(d.c || {})) {
+    const kp = keyParts(key); if (!kp) continue; const P = d.c[key].p || {}; if (!Object.keys(P).length) continue;
+    const C = course(...kp); let a = 0, c = 0;
+    C.list.forEach(x => { if (P[x.i] === undefined) return; a++; const g = P[x.i] === x.ans; if (g) c++; const t = tp.get(SUBJ[C.sub].name + ' · ' + x.tp) || [0, 0]; t[1]++; if (g) t[0]++; tp.set(SUBJ[C.sub].name + ' · ' + x.tp, t); });
+    rows.push({ sub: C.sub, g: C.g, t: C.t, a, c, total: C.list.length }); n += a; ok += c;
+  }
+  rows.sort((x, y) => x.sub.localeCompare(y.sub) || x.g - y.g || x.t - y.t);
+  const weak = [...tp].filter(([, [a, b]]) => b >= 5).map(([t, [a, b]]) => [t, a / b, b]).sort((x, y) => x[1] - y[1]).slice(0, 5).filter(w => w[1] < .7);
+  const strong = [...tp].filter(([, [a, b]]) => b >= 8).map(([t, [a, b]]) => [t, a / b, b]).sort((x, y) => y[1] - x[1]).slice(0, 3).filter(w => w[1] >= .85);
+  return { d, rows, n, ok, weak, strong };
+}
+function parentView(back) {
+  VIEW = 'parent'; document.body.dataset.sub = 'm';
+  const kids = DB.profiles || [];
+  const card = p => {
+    const R = kidReport(p.id), d = R.d, jp = (d.jp || {}).best || {}, sets = typeof jpSets === 'function' ? jpSets() : {};
+    const streak = d.streak && (d.streak.d === dayStr() || d.streak.d === dayStr(new Date(Date.now() - 864e5))) ? d.streak.n : 0;
+    return `<section class="panel stack kidrep" style="gap:12px">
+      <div class="row" style="gap:10px;flex-wrap:nowrap">${avatar(p)}<div style="min-width:0"><h2 style="font-size:20px">${esc(p.name)}</h2><p class="muted small">เล่นล่าสุด ${d.day && d.day.d ? esc(d.day.d.split('-').reverse().join('/')) : '—'} · ต่อเนื่อง ${streak} วัน</p></div></div>
+      <div class="jpsplit"><div><b>${R.n.toLocaleString('en-US')}</b><span>ข้อที่ทำ</span></div><div><b>${R.n ? Math.round(R.ok / R.n * 100) : 0}%</b><span>ตอบถูก</span></div><div><b>${Object.keys(d.bad || {}).length}</b><span>เหรียญ</span></div></div>
+      ${R.rows.length ? `<div><p class="label">ความคืบหน้ารายวิชา</p><div class="bars">${R.rows.map(r => `<div class="brow"><span>${SUBJ[r.sub].name} ป.${r.g} เทอม ${r.t} · ถูก ${Math.round(r.c / r.a * 100)}%</span><span>${r.a}/${r.total}</span><span class="t"><i class="${r.c / r.a < .5 ? 'low' : ''}" style="width:${r.a / r.total * 100}%"></i></span></div>`).join('')}</div></div>` : '<p class="muted small">ยังไม่ได้เริ่มทำแบบฝึก</p>'}
+      ${R.weak.length ? `<div><p class="label">ควรทบทวน (ตอบถูกน้อย)</p><ul class="tlist" style="margin:0">${R.weak.map(([t, r, b]) => `<li><span>${esc(t)}</span><span class="lowtxt">${Math.round(r * 100)}% จาก ${b} ข้อ</span></li>`).join('')}</ul></div>` : ''}
+      ${R.strong.length ? `<div><p class="label">ทำได้ดีมาก</p><ul class="tlist" style="margin:0">${R.strong.map(([t, r, b]) => `<li><span>${esc(t)}</span><span style="color:var(--ok)">${Math.round(r * 100)}%</span></li>`).join('')}</ul></div>` : ''}
+      ${Object.keys(jp).length ? `<div><p class="label">ข้อสอบ จภ. (คะแนนดีที่สุด)</p><ul class="tlist" style="margin:0">${Object.entries(jp).map(([id, b]) => `<li><span>${esc(sets[id] ? jpName(id) : id)}</span><span><b>${b.total}</b>/100</span></li>`).join('')}</ul></div>` : ''}
+    </section>`;
+  };
+  app.innerHTML = `<div class="stack">
+    <div class="top"><button class="btn ghost" id="back">← กลับ</button></div>
+    <header><p class="label">สำหรับผู้ปกครอง</p><h1>พัฒนาการของลูก</h1><p class="muted small" style="margin-top:4px">${USER ? 'รวมข้อมูลจากทุกเครื่องที่ล็อกอินบัญชีนี้' : 'ข้อมูลจากเครื่องนี้เท่านั้น (เข้าสู่ระบบเพื่อรวมทุกเครื่อง)'}</p></header>
+    ${kids.length ? kids.map(card).join('') : '<p class="panel muted">ยังไม่มีผู้เล่น</p>'}
+  </div>`;
+  document.getElementById('back').onclick = () => { (back || profiles)(); toTop(); };
+  toTop();
+}
+
+// ---------- นโยบายความเป็นส่วนตัว ----------
+function privacyView(back) {
+  VIEW = 'privacy'; document.body.dataset.sub = 'm';
+  app.innerHTML = `<div class="stack">
+    <div class="top"><button class="btn ghost" id="back">← กลับ</button></div>
+    <header><p class="label">ผจญภัยแดนความรู้</p><h1>นโยบายความเป็นส่วนตัว</h1><p class="muted small">ปรับปรุงล่าสุด 12 พฤศจิกายน 2569</p></header>
+    <section class="panel privacy">
+      <h3>1. ข้อมูลที่เราเก็บ</h3>
+      <p><b>ถ้าไม่เข้าสู่ระบบ:</b> ไม่มีข้อมูลใดส่งออกจากเครื่อง ชื่อเล่นและความคืบหน้าเก็บไว้ในเบราว์เซอร์ของเครื่องนั้นเท่านั้น</p>
+      <p><b>ถ้าผู้ปกครองเข้าสู่ระบบ:</b> เราเก็บ (1) อีเมลของผู้ปกครองที่ใช้ล็อกอิน (2) ชื่อเล่นและสีประจำตัวของเด็กที่ผู้ปกครองตั้ง (3) ความคืบหน้าการทำแบบฝึก คะแนน ดาว เหรียญ และวันที่เล่น</p>
+      <p>เราไม่เก็บชื่อจริง วันเกิด รูปภาพ เบอร์โทร ที่อยู่ ตำแหน่งที่ตั้ง หรือข้อมูลการชำระเงิน และแนะนำให้ใช้ชื่อเล่นเท่านั้น</p>
+      <h3>2. ใช้ข้อมูลเพื่ออะไร</h3>
+      <p>เพื่อบันทึกและซิงก์ความคืบหน้าให้ใช้ได้หลายเครื่อง แสดงพัฒนาการในหน้าผู้ปกครอง และปรับปรุงคุณภาพโจทย์ (เช่น ดูว่าข้อใดมีคนตอบผิดมากผิดปกติ) โดยดูเป็นภาพรวม</p>
+      <p>แอปนี้<b>ไม่มีโฆษณา</b> ไม่ใช้เครื่องมือติดตามพฤติกรรม (analytics) และ<b>ไม่ขายหรือส่งต่อข้อมูล</b>ให้บุคคลอื่น</p>
+      <h3>3. เก็บไว้ที่ไหน ปลอดภัยแค่ไหน</h3>
+      <p>เก็บบนบริการ Google Firebase ศูนย์ข้อมูลกรุงเทพฯ (asia-southeast3) รับส่งข้อมูลแบบเข้ารหัส (HTTPS) และตั้งกฎให้แต่ละบัญชีเข้าถึงได้เฉพาะข้อมูลของตัวเอง มีเพียงผู้ดูแลแอปที่ดูภาพรวมได้เพื่อดูแลระบบ</p>
+      <h3>4. ข้อมูลของเด็ก</h3>
+      <p>บัญชีต้องสมัครโดยผู้ปกครอง ซึ่งเป็นผู้ให้ความยินยอมแทนเด็กตามพระราชบัญญัติคุ้มครองข้อมูลส่วนบุคคล พ.ศ. 2562 (PDPA)</p>
+      <h3>5. สิทธิของคุณ</h3>
+      <p>ดูข้อมูลได้ในหน้าผู้ปกครอง ส่งออกได้ด้วยปุ่ม "สำรองข้อมูล" แก้ไขหรือลบชื่อเด็กได้ในหน้าเลือกผู้เล่น และ<b>ลบบัญชีพร้อมข้อมูลทั้งหมด</b>ได้เองที่หน้า "บัญชี" → "ลบบัญชีและข้อมูลทั้งหมด" ระบบลบทันทีและกู้คืนไม่ได้</p>
+      <h3>6. ระยะเวลาเก็บ</h3>
+      <p>เก็บไว้จนกว่าผู้ปกครองจะลบบัญชี</p>
+      <h3>7. ติดต่อ</h3>
+      <p>สอบถามหรือขอใช้สิทธิเกี่ยวกับข้อมูลส่วนบุคคล ติดต่อผู้ดูแลแอปได้ทางอีเมลที่แสดงบนหน้าจอเข้าสู่ระบบด้วย Google ของแอปนี้</p>
+    </section>
+  </div>`;
+  document.getElementById('back').onclick = () => { (back || profiles)(); toTop(); };
+  toTop();
+}
 </script>
 <script>
 // ---------- ไอคอนและภาพ ----------
@@ -2032,7 +2330,7 @@ const app=document.getElementById('app');
 const KEY='qb3';
 let DB=(()=>{try{return JSON.parse(localStorage.getItem(KEY))||{}}catch(e){return {}}})();
 DB.profiles=DB.profiles||[];DB.data=DB.data||{};
-const save=()=>{try{localStorage.setItem(KEY,JSON.stringify(DB))}catch(e){}};
+const save=()=>{DB.t=Date.now();try{localStorage.setItem(KEY,JSON.stringify(DB))}catch(e){}if(typeof cloudQueue==='function')cloudQueue()};
 const me=()=>DB.profiles.find(p=>p.id===DB.cur);
 const mine=()=>{const d=DB.data[DB.cur]=DB.data[DB.cur]||{};d.c=d.c||{};d.sel=d.sel||{g:4,t:1,sub:'m'};d.bad=d.bad||{};if(d.snd===undefined)d.snd=true;return d};
 const prog=key=>{const c=mine().c;return c[key]=c[key]||{p:{}}};
@@ -2145,9 +2443,10 @@ const bindWho=()=>{const b=document.getElementById('who');if(b)b.onclick=()=>{pr
 // ---------- ผู้เล่น ----------
 let profEdit=false,profDel=null;
 function profiles(){
-  document.body.dataset.sub='m';let color=COLORS[DB.profiles.length%COLORS.length];
+  if(typeof VIEW!=='undefined')VIEW='profiles';document.body.dataset.sub='m';let color=COLORS[DB.profiles.length%COLORS.length];
   app.innerHTML=`<div class="stack">
     <div class="hero">${OWL('hi')}<div class="bubble"><b>สวัสดีจ้า ฉันชื่อฮูกกี้</b><br>มาผจญภัยในแดนความรู้ด้วยกันนะ ใครจะเล่นวันนี้</div></div>
+    ${typeof cloudBar==='function'?cloudBar():''}
     ${DB.profiles.length?`<div class="plist">${DB.profiles.map(p=>profDel===p.id?`<div class="pdel"><p><b>ลบ "${esc(p.name)}" ใช่ไหม</b><br><span class="small">ดาว เหรียญ และความคืบหน้าทั้งหมดของ ${esc(p.name)} จะหายไป กู้คืนไม่ได้ (ยกเว้นมีรหัสสำรองไว้)</span></p><div class="row" style="gap:8px"><button class="btn sm dangerbtn" data-delok="${p.id}">ลบเลย</button><button class="btn sm" data-delno>ยกเลิก</button></div></div>`:`<div class="prow"><button class="pbtn" data-p="${p.id}"${profEdit?' disabled':''}>${avatar(p)}<span><b style="font-family:var(--f-display);font-size:18px">${esc(p.name)}</b><br><span class="muted small">${summaryOf(p.id)}</span></span></button>${profEdit?`<button class="btn sm dangerbtn" data-del="${p.id}" aria-label="ลบ ${esc(p.name)}">ลบ</button>`:''}</div>`).join('')}</div>
     <button class="btn ghost small" id="pedit" style="align-self:flex-end">${profEdit?'เสร็จแล้ว':'แก้ไขรายชื่อ / ลบชื่อ'}</button>`:''}
     <form id="add" class="panel stack" style="gap:8px"><label for="pname" style="font-family:var(--f-display);font-weight:700">${DB.profiles.length?'เพิ่มผู้เล่นใหม่':'พิมพ์ชื่อเล่นเพื่อเริ่มผจญภัย'}</label>
@@ -2155,15 +2454,17 @@ function profiles(){
       <div><span class="small muted">เลือกสีประจำตัว</span><div class="colors" role="group" aria-label="เลือกสี">${COLORS.map(c=>`<button type="button" data-c="${c}" style="background:${c}" aria-pressed="${c===color}" aria-label="สี"></button>`).join('')}</div></div>
       <p class="err" id="perr"></p></form>
     <p class="foot">ความคืบหน้าบันทึกไว้ในเครื่องนี้ แต่ละคนแยกกัน</p>
-    <button class="btn sm" id="bk" style="align-self:center">สำรองข้อมูล / ย้ายเครื่อง</button>
+    <div class="row" style="gap:8px;justify-content:center">${DB.profiles.length?'<button class="btn sm" id="parent">หน้าผู้ปกครอง</button>':''}<button class="btn sm" id="bk">สำรองข้อมูล / ย้ายเครื่อง</button></div>
   </div>`;
   document.getElementById('bk').onclick=()=>{sound('tap');backupView();toTop()};
+  const pa=document.getElementById('parent');if(pa)pa.onclick=()=>{sound('tap');parentView(profiles)};
+  if(typeof bindCloudBar==='function')bindCloudBar();
   app.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{if(profEdit)return;DB.cur=b.dataset.p;save();sound('tap');home();toTop()});
   const pe=document.getElementById('pedit');if(pe)pe.onclick=()=>{profEdit=!profEdit;profDel=null;sound('tap');profiles()};
   app.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{profDel=b.dataset.del;profiles()});
   app.querySelectorAll('[data-delno]').forEach(b=>b.onclick=()=>{profDel=null;profiles()});
   app.querySelectorAll('[data-delok]').forEach(b=>b.onclick=()=>{const id=b.dataset.delok,nm=(DB.profiles.find(p=>p.id===id)||{}).name;
-    DB.profiles=DB.profiles.filter(p=>p.id!==id);delete DB.data[id];if(DB.cur===id)DB.cur=null;profDel=null;if(!DB.profiles.length)profEdit=false;save();toast('ลบ '+nm+' แล้ว');profiles()});
+    DB.profiles=DB.profiles.filter(p=>p.id!==id);delete DB.data[id];DB.deleted=[...(DB.deleted||[]),id];if(DB.cur===id)DB.cur=null;profDel=null;if(!DB.profiles.length)profEdit=false;save();toast('ลบ '+nm+' แล้ว');profiles()});
   app.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>{color=b.dataset.c;app.querySelectorAll('[data-c]').forEach(x=>x.setAttribute('aria-pressed',x===b))});
   const inp=document.getElementById('pname');inp.oninput=()=>document.getElementById('perr').textContent='';
   document.getElementById('add').onsubmit=e=>{e.preventDefault();const n=inp.value.trim();
@@ -2175,6 +2476,7 @@ function summaryOf(pid){const c=(DB.data[pid]||{}).c||{};let n=0;Object.values(c
 
 // ---------- หน้าแรก ----------
 function home(){
+  if(typeof VIEW!=='undefined')VIEW='home';
   if(!me())return profiles();
   const d=mine(),S=d.sel;document.body.dataset.sub=S.sub;
   const today=d.day&&d.day.d===dayStr()?d.day.n:0,name=me().name;
@@ -2596,7 +2898,7 @@ function backupView(){
   const restore=s=>{const er=document.getElementById('rerr');let d;try{d=unpackDB(s)}catch(e){er.textContent='รหัสหรือไฟล์ไม่ถูกต้อง ลองคัดลอกใหม่ให้ครบทั้งหมด';return}
     if(!d||!Array.isArray(d.profiles)){er.textContent='ไม่พบข้อมูลผู้เล่นในรหัสนี้';return}
     if(!confirm('กู้คืนข้อมูลผู้เล่น '+d.profiles.length+' คน แทนที่ข้อมูลในเครื่องนี้ ตกลงไหม'))return;
-    DB=d;DB.data=DB.data||{};if(!DB.profiles.some(p=>p.id===DB.cur))DB.cur=(DB.profiles[0]||{}).id;save();sound('win');toast('กู้คืนเรียบร้อย');profiles();toTop()};
+    DB=d;DB.data=DB.data||{};if(typeof USER!=='undefined'&&USER)DB.uid=USER.uid;if(!DB.profiles.some(p=>p.id===DB.cur))DB.cur=(DB.profiles[0]||{}).id;save();sound('win');toast('กู้คืนเรียบร้อย');profiles();toTop()};
   document.getElementById('rs').onclick=()=>restore(document.getElementById('paste').value);
   document.getElementById('file').onchange=e=>{const fl=e.target.files[0];if(!fl)return;const r=new FileReader();r.onload=()=>restore(r.result);r.readAsText(fl)};
 }
@@ -2605,5 +2907,6 @@ try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}ca
 if('serviceWorker' in navigator&&(location.protocol==='https:'||location.hostname==='localhost')&&!/(^|\.)claude\.ai$/.test(location.hostname)&&!/claudeusercontent/.test(location.hostname))
   window.addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 
+if(typeof cloudInit==='function')cloudInit();
 home();
 </script>
