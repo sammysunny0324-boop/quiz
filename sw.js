@@ -1,5 +1,5 @@
 // Service worker: ให้เปิดเว็บได้แม้ไม่มีเน็ต (หลังเปิดครั้งแรก) และอัปเดตเองเมื่อมีเวอร์ชันใหม่
-const VER = 'e79317e96b';
+const VER = '7cf8b27aca';
 const CORE = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './apple-touch-icon.png', './favicon-64.png'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open('core-' + VER).then(c => c.addAll(CORE)).then(() => self.skipWaiting()));
